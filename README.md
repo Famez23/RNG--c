@@ -16,7 +16,7 @@ This project implements a parallel pipeline for RNG construction over large 2D p
 | `testing.cu` |RNG using CUDA and OpenMP  |
 
 ## Requirements
--**this project was developed in the FINITERRAE III supercomputer of CESGA using 32 cores , a TESLA T4 and 128GB of memory**
+This project was developed on the **FinisTerrae III** supercomputer at [CESGA](https://www.cesga.es/) using 32 cores, an NVIDIA Tesla T4 GPU, and 128 GB of memory
 - **C++17** compiler with OpenMP support
 - **CUDA Toolkit** (for `testing.cu`)
 - **CGAL** library with GMP and MPFR
