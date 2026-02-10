@@ -11,12 +11,12 @@ This project implements a parallel pipeline for RNG construction over large 2D p
 | File | Description                                       |
 |------|---------------------------------------------------|
 | `pt.cpp` | Point generation — produces the input dataset |
-| `cgal.cpp` | Delaunay triangulation using CGAL library   |
-| `dc.cpp` | CPU-based processing and edge extraction      |
-| `testing.cu` | CUDA kernel for parallel RNG edge validation |
+| `cgal.cpp` |RNG using Delaunay triangulation using CGAL library  (REFRENCE) |
+| `dc.cpp` | RNG based sequential processing    ( BASELINE  )      |
+| `testing.cu` |RNG using CUDA and OpenMP  |
 
 ## Requirements
-
+-**this project was developed in the FINITERRAE III supercomputer of CESGA using 32 cores , a TESLA T4 and 128GB of memory**
 - **C++17** compiler with OpenMP support
 - **CUDA Toolkit** (for `testing.cu`)
 - **CGAL** library with GMP and MPFR
