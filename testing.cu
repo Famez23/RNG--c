@@ -646,7 +646,6 @@ __global__ void verify_rng_edges_spatial_kernel_idx(
     const pt u = load_pt_ldg(&points[u_idx]);
     const pt v = load_pt_ldg(&points[v_idx]);
 
-    // Use exact integer arithmetic for distance comparisons
     const long long dx = u.x - v.x;
     const long long dy = u.y - v.y;
     const long long r2 = dx*dx + dy*dy;
@@ -656,7 +655,6 @@ __global__ void verify_rng_edges_spatial_kernel_idx(
         return;
     }
 
-    // Use float only for approximate cell radius calculation
     const float r = sqrtf((float)r2);
     const float inv_cell = 1.0f / (float)cell_size;
     const int cell_radius = (int)(r * inv_cell) + 1;
@@ -669,16 +667,28 @@ __global__ void verify_rng_edges_spatial_kernel_idx(
     const int max_r  = min(cell_radius, max(max_rx, max_ry));
 
     uint8_t keep = 1;
+    
+    // Use warp-level early exit
+    unsigned int active_mask = __activemask();
 
-    for (int rring = 0; rring <= max_r && keep; ++rring) {
-        for (int dy_cell = -rring; dy_cell <= rring && keep; ++dy_cell) {
+    for (int rring = 0; rring <= max_r; ++rring) {
+        // Check if entire warp has finished
+        unsigned int still_active = __ballot_sync(active_mask, keep);
+        if (still_active == 0) break; // All threads found violations
+        
+        if (!keep) continue; // This thread is done
+        
+        for (int dy_cell = -rring; dy_cell <= rring; ++dy_cell) {
             int abs_dy = (dy_cell < 0) ? -dy_cell : dy_cell;
-            for (int dx_cell = -rring; dx_cell <= rring && keep; ++dx_cell) {
+            for (int dx_cell = -rring; dx_cell <= rring; ++dx_cell) {
                 int abs_dx = (dx_cell < 0) ? -dx_cell : dx_cell;
-                if (abs_dx != rring && abs_dy != rring) continue; 
+                
+                int on_ring_edge = (abs_dx == rring) | (abs_dy == rring);
+                if (!on_ring_edge) continue;
 
                 int cell_x = cu_x + dx_cell;
                 int cell_y = cu_y + dy_cell;
+                
                 if ((unsigned)cell_x >= (unsigned)grid_width ||
                     (unsigned)cell_y >= (unsigned)grid_height) continue;
 
@@ -687,15 +697,13 @@ __global__ void verify_rng_edges_spatial_kernel_idx(
                 if (count <= 0) continue;
 
                 int start = __ldg(&cell_starts[cell_id]);
+                
                 for (int ii = 0; ii < count && keep; ++ii) {
                     int sorted_idx = start + ii;
-                    
-                    // Compare in SORTED space
                     if (sorted_idx == u_idx || sorted_idx == v_idx) continue;
                     
                     const pt w = load_pt_ldg(&points[sorted_idx]);
                     
-                    // Exact integer distance comparisons
                     const long long dxu = w.x - u.x;
                     const long long dyu = w.y - u.y;
                     const long long d2u = dxu*dxu + dyu*dyu;
@@ -706,7 +714,7 @@ __global__ void verify_rng_edges_spatial_kernel_idx(
                     const long long d2v = dxv*dxv + dyv*dyv;
                     if (d2v < r2) {
                         keep = 0;
-                        break; 
+                        break;
                     }
                 }
             }
@@ -874,16 +882,17 @@ void free_spatial_grid(SpatialGrid& grid) {
     cudaFree(grid.sorted_points);
 }
 
-std::vector<std::pair<pt,pt>>
+inline std::vector<std::pair<pt,pt>>
 extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
                          const std::vector<pt>& all_points)
 {
-    using clk = std::chrono::high_resolution_clock;
+     using clk = std::chrono::high_resolution_clock;
     auto t0 = clk::now();
 
     const int n_points = (int)all_points.size();
     const int n_tris   = (int)triangles_i.size();
 
+    // ========== FASE DE PREPARACIÓN (igual que antes) ==========
     auto tB0 = clk::now();
     std::vector<uint64_t> keys((size_t)n_tris * 3);
 
@@ -896,7 +905,9 @@ extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
         keys[base + 2] = pack_pair_ids(tr.c, tr.a);
     }
     auto tB1 = clk::now();
-
+    std::cout << "prep.emit_edges(idx) = " 
+              << std::chrono::duration<double,std::milli>(tB1-tB0).count() 
+              << " ms\n";
 
     auto tC0 = clk::now();
     thrust::device_vector<uint64_t> d_keys(keys.begin(), keys.end());
@@ -905,25 +916,29 @@ extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
     std::vector<uint64_t> uniq_keys(d_keys.size());
     thrust::copy(d_keys.begin(), d_keys.end(), uniq_keys.begin());
     auto tC1 = clk::now();
-
+    std::cout << "prep.sort_unique(GPU) = " 
+              << std::chrono::duration<double,std::milli>(tC1-tC0).count() 
+              << " ms\n";
 
     auto tD0 = clk::now();
     const int n_candidates = (int)uniq_keys.size();
     std::vector<int> cand_u(n_candidates), cand_v(n_candidates);
 
     for (int i = 0; i < n_candidates; ++i) {
-        int u,v; unpack_pair_ids(uniq_keys[i], u, v);
+        int u,v; 
+        unpack_pair_ids(uniq_keys[i], u, v);
         cand_u[i] = u;
         cand_v[i] = v;
     }
     auto tD1 = clk::now();
+    std::cout << "prep.candidates(idx)  = " 
+              << std::chrono::duration<double,std::milli>(tD1-tD0).count() 
+              << " ms\n";
 
     std::cout << "GPU: Checking " << n_candidates
               << " candidates with " << n_points << " points\n";
 
-
     auto tE0 = clk::now();
-
     thrust::device_vector<pt> d_sorted_points;
     thrust::device_vector<int> d_point_indices;
     thrust::device_vector<int> d_old2new;
@@ -934,14 +949,14 @@ extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
         d_point_indices,
         d_old2new
     );
-
     auto tE1 = clk::now();
+    std::cout << "prep.grid(build)      = " 
+              << std::chrono::duration<double,std::milli>(tE1-tE0).count() 
+              << " ms\n";
 
     auto tF0 = clk::now();
-
     thrust::device_vector<int> d_cu(cand_u.begin(), cand_u.end());
     thrust::device_vector<int> d_cv(cand_v.begin(), cand_v.end());
-
     thrust::device_vector<int> d_cu_new(n_candidates);
     thrust::device_vector<int> d_cv_new(n_candidates);
 
@@ -956,14 +971,19 @@ extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
         thrust::raw_pointer_cast(d_old2new.data()),
         n_candidates
     );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     thrust::device_vector<uint8_t> d_keep(n_candidates);
     auto tF1 = clk::now();
+    std::cout << "prep.H2D+convert      = " 
+              << std::chrono::duration<double,std::milli>(tF1-tF0).count() 
+              << " ms\n";
 
-
+    // ========== KERNEL EXECUTION (AHORA CON TIMER) ==========
+    auto tKernel0 = clk::now();
+    
     verify_rng_edges_spatial_kernel_idx<<<BLK, TPB>>>(
-        grid.sorted_points,      
+        grid.sorted_points,
         n_points,
         thrust::raw_pointer_cast(d_cu_new.data()),
         thrust::raw_pointer_cast(d_cv_new.data()),
@@ -976,46 +996,102 @@ extract_rng_cuda_vec_idx(const std::vector<TriI>& triangles_i,
         grid.cell_size,
         grid.grid_width, grid.grid_height
     );
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    auto tKernel1 = clk::now();
+    std::cout << "*** KERNEL EXECUTION  = " 
+              << std::chrono::duration<double,std::milli>(tKernel1-tKernel0).count() 
+              << " ms ***\n";
 
-    auto tG0 = clk::now();
-    std::vector<uint8_t> keep(n_candidates);
-    thrust::copy(d_keep.begin(), d_keep.end(), keep.begin());
+    // ========== OPTIMIZACIÓN: STREAM COMPACTION EN GPU ==========
+    auto tCompact0 = clk::now();
+    
+    // En vez de copiar todos los flags, compactar en GPU
+    thrust::device_vector<int> d_kept_indices(n_candidates);
+    
+    // Copiar solo los índices donde keep=1
+    auto end_iter = thrust::copy_if(
+        thrust::make_counting_iterator(0),
+        thrust::make_counting_iterator(n_candidates),
+        d_keep.begin(),
+        d_kept_indices.begin(),
+        thrust::identity<uint8_t>()  // Predicate: keep flag != 0
+    );
+    
+    int num_kept = end_iter - d_kept_indices.begin();
+    d_kept_indices.resize(num_kept);
+    
+    auto tCompact1 = clk::now();
+    std::cout << "gpu.stream_compact    = " 
+              << std::chrono::duration<double,std::milli>(tCompact1-tCompact0).count()
+              << " ms (kept " << num_kept << " / " << n_candidates << " = "
+              << (100.0 * num_kept / n_candidates) << "%)\n";
 
-    free_spatial_grid(grid);
-    auto tG1 = clk::now();
+    // ========== OPTIMIZACIÓN: D2H COPY REDUCIDO ==========
+    auto tD2H0 = clk::now();
+    
+    // Copiar solo los índices válidos (mucho menos datos)
+    std::vector<int> kept_indices(num_kept);
+    thrust::copy(d_kept_indices.begin(), d_kept_indices.end(), 
+                 kept_indices.begin());
+    
+    auto tD2H1 = clk::now();
+    std::cout << "post.D2H(optimized)   = " 
+              << std::chrono::duration<double,std::milli>(tD2H1-tD2H0).count()
+              << " ms (transferred " << (num_kept * sizeof(int) / 1e6) 
+              << " MB instead of " << (n_candidates / 1e6) << " MB)\n";
 
+    // ========== OPTIMIZACIÓN: CLEANUP ASYNC ==========
+    auto tCleanup0 = clk::now();
+    
+    // Crear stream para cleanup asíncrono
+    cudaStream_t cleanup_stream;
+    CUDA_CHECK(cudaStreamCreate(&cleanup_stream));
+    
+    // Liberar memoria GPU sin bloquear
+    CUDA_CHECK(cudaFreeAsync(grid.cell_starts, cleanup_stream));
+    CUDA_CHECK(cudaFreeAsync(grid.cell_counts, cleanup_stream));
+    CUDA_CHECK(cudaFreeAsync(grid.point_indices, cleanup_stream));
+    CUDA_CHECK(cudaFreeAsync(grid.sorted_points, cleanup_stream));
+    
+    // No hacer sync aquí - dejar que limpie en background
+    
+    auto tCleanup1 = clk::now();
+    std::cout << "post.cleanup(async)   = " 
+              << std::chrono::duration<double,std::milli>(tCleanup1-tCleanup0).count()
+              << " ms\n";
 
-    auto tH0 = clk::now();
-    std::vector<std::pair<pt,pt>> out;
-    out.reserve(n_candidates);
-
-    for (int i = 0; i < n_candidates; ++i) {
-        if (keep[i]) {
-            out.emplace_back(
-                all_points[cand_u[i]],
-                all_points[cand_v[i]]
-            );
-        }
+    // ========== OPTIMIZACIÓN: CONSTRUCCIÓN PARALELA DEL OUTPUT ==========
+    auto tBuild0 = clk::now();
+    
+    // Pre-allocar el vector de salida con el tamaño exacto
+    std::vector<std::pair<pt,pt>> out(num_kept);
+    
+    // Construir en paralelo usando OpenMP
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < num_kept; ++i) {
+        int idx = kept_indices[i];
+        out[i] = std::make_pair(
+            all_points[cand_u[idx]],
+            all_points[cand_v[idx]]
+        );
     }
-    auto tH1 = clk::now();
+    
+    auto tBuild1 = clk::now();
+    std::cout << "post.build_vec        = " 
+              << std::chrono::duration<double,std::milli>(tBuild1-tBuild0).count()
+              << " ms\n";
 
-    auto ms = [](auto a, auto b){
-        return std::chrono::duration<double,std::milli>(b-a).count();
-    };
+    // Esperar a que termine el cleanup
+    CUDA_CHECK(cudaStreamSynchronize(cleanup_stream));
+    CUDA_CHECK(cudaStreamDestroy(cleanup_stream));
 
-    std::cout << "prep.emit_edges(idx) = " << ms(tB0,tB1) << " ms\n";
-    std::cout << "prep.sort_unique(GPU) = " << ms(tC0,tC1) << " ms\n";
-    std::cout << "prep.candidates(idx)  = " << ms(tD0,tD1) << " ms\n";
-    std::cout << "prep.grid(build)      = " << ms(tE0,tE1) << " ms\n";
-    std::cout << "prep.H2D+convert      = " << ms(tF0,tF1) << " ms\n";
-    std::cout << "post.D2H+cleanup      = " << ms(tG0,tG1) << " ms\n";
-    std::cout << "post.build_vec        = " << ms(tH0,tH1) << " ms\n";
-
-    std::cout << "Total extract_rng_cuda_vec_idx time: "
-              << std::chrono::duration<double>(clk::now()-t0).count()
+    auto tTotal = clk::now();
+    std::cout << "Total extract_rng_cuda_vec_optimized time: "
+              << std::chrono::duration<double>(tTotal-t0).count()
               << " s\n";
-
-    return std::move(out);
+    
+    return out;
 }
 
 
@@ -1103,18 +1179,22 @@ int main() {
         auto end_dt = chrono::high_resolution_clock::now();
         cout << "Number of triangles: " << triangles.size() << "\n";
         cout << "delaunay execution time: " << chrono::duration<double>(end_dt - start_dt).count() << " seconds\n";
-        
-        auto start_rng = chrono::high_resolution_clock::now();
-        size_t rng_count = 0;
-            cudaProfilerStart();  // Start profiling
-        auto vec = extract_rng_cuda_vec_idx(tris_i, points);
-            cudaProfilerStop();   // Stop profiling
-        rng_count = vec.size();
-        
-        auto end_rng = chrono::high_resolution_clock::now();
-        cout << "Number of RNG edges: " << rng_count << "\n";
-        cout << "extract execution time: " << chrono::duration<double>(end_rng - start_rng).count() << " seconds\n";
+        auto vec_warmup = extract_rng_cuda_vec_idx(tris_i, points);
 
+        auto start_rng = chrono::high_resolution_clock::now();
+// cudaProfilerStart();
+
+auto t_before_call = chrono::high_resolution_clock::now();
+auto vec = extract_rng_cuda_vec_idx(tris_i, points);
+auto t_after_call = chrono::high_resolution_clock::now();
+
+// cudaProfilerStop();
+auto end_rng = chrono::high_resolution_clock::now();
+cout << "Number of RNG edges: " << vec.size() << "\n";
+cout << "Time inside function call: " 
+<< chrono::duration<double>(t_after_call - t_before_call).count() 
+<< " s\n";
+cout << "RNG extraction time: " << chrono::duration<double>(end_rng - start_rng).count() << " seconds\n";
         auto end = chrono::high_resolution_clock::now();
         cout << "Total execution time: " << chrono::duration<double>(end - start).count() << " seconds\n";
         cout << "--------------------------------\n";
