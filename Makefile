@@ -1,69 +1,57 @@
-# Compiler settings
-CXX = g++
-NVCC = nvcc
-CXXFLAGS = -O3 -std=c++17 -fopenmp
-NVCCFLAGS = -O3 -std=c++17 -Xcompiler -fopenmp
-LDFLAGS = -fopenmp
-
-# CGAL flags (if needed)
+CXX      = g++
+NVCC     = nvcc
+CXXFLAGS  = -O3 -std=c++17 -fopenmp
+NVCCFLAGS = -O3 -std=c++17 -arch=sm_70 -Xcompiler -fopenmp
+LDFLAGS   = -fopenmp
 CGAL_FLAGS = -lCGAL -lgmp -lmpfr
 
-# Target executables
-PT_EXEC = pt
-CGAL_EXEC = cgal
-DC_EXEC = dc
+PT_EXEC      = pt
+CGAL_EXEC    = cgal
+DC_EXEC      = dc
 TESTING_EXEC = testing
+ALL_EXECS    = $(PT_EXEC) $(CGAL_EXEC) $(DC_EXEC) $(TESTING_EXEC)
 
-# All executables
-ALL_EXECS = $(PT_EXEC) $(CGAL_EXEC) $(DC_EXEC) $(TESTING_EXEC)
+all: run-others
 
-# Default target: compile pt first, run it, then compile and run others
-all: run-pt run-others
+run-others: run-pt
+	@echo "Starting others..."
+	$(MAKE) run-testing
 
-# Compile and run pt.cpp first
 run-pt: $(PT_EXEC)
 	@echo "Executing pt..."
 	./$(PT_EXEC)
 
-# Compile pt.cpp
 $(PT_EXEC): pt.cpp
 	@echo "Compiling pt.cpp..."
 	$(CXX) $(CXXFLAGS) -o $(PT_EXEC) pt.cpp $(LDFLAGS)
 
-# Compile and run the rest after pt
-run-others: run-cgal run-dc run-testing
+# Chain: run-testing -> run-dc -> run-cgal (strict serial order)
+run-testing: run-dc $(TESTING_EXEC)
+	@echo "Executing testing..."
+	./$(TESTING_EXEC)
 
-# CGAL executable
-$(CGAL_EXEC): cgal.cpp
-	@echo "Compiling cgal.cpp..."
-	$(CXX) $(CXXFLAGS) -o $(CGAL_EXEC) cgal.cpp $(CGAL_FLAGS) $(LDFLAGS)
+run-dc: run-cgal $(DC_EXEC)
+	@echo "Executing dc..."
+	./$(DC_EXEC)
 
-# DC executable
-$(DC_EXEC): dc.cpp
-	@echo "Compiling dc.cpp..."
-	$(CXX) $(CXXFLAGS) -o $(DC_EXEC) dc.cpp $(LDFLAGS)
-
-# CUDA testing executable with jemalloc
-$(TESTING_EXEC): testing.cu
-	@echo "Compiling testing.cu with jemalloc..."
-	$(NVCC) $(NVCCFLAGS) -o $(TESTING_EXEC) testing.cu -ljemalloc
-
-# Run individual executables
 run-cgal: $(CGAL_EXEC)
 	@echo "Executing cgal..."
 	./$(CGAL_EXEC)
 
-run-dc: $(DC_EXEC)
-	@echo "Executing dc..."
-	./$(DC_EXEC)
+$(CGAL_EXEC): cgal.cpp
+	@echo "Compiling cgal.cpp..."
+	$(CXX) $(CXXFLAGS) -o $(CGAL_EXEC) cgal.cpp $(CGAL_FLAGS) $(LDFLAGS)
 
-run-testing: $(TESTING_EXEC)
-	@echo "Executing testing..."
-	./$(TESTING_EXEC)
+$(DC_EXEC): dc.cpp
+	@echo "Compiling dc.cpp..."
+	$(CXX) $(CXXFLAGS) -o $(DC_EXEC) dc.cpp $(LDFLAGS)
+
+$(TESTING_EXEC): testing.cu
+	@echo "Compiling testing.cu..."
+	$(NVCC) $(NVCCFLAGS) -o $(TESTING_EXEC) testing.cu -ljemalloc
 
 clean:
-	rm -f $(ALL_EXECS)
-	rm -f *.csv
+	rm -f $(ALL_EXECS) *.csv
 
 rebuild: clean all
 
